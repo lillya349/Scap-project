@@ -1,0 +1,413 @@
+---
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# Processing and Analysis of Tumor Data
+
+## Step 0: Aligning Single Nuceli Data to Reference genome
+
+*Single Nuclei samples were aligned using CellRanger with the following
+settings:*
+
+Chemistry: Single Cell 3' v3
+
+Include introns: True
+
+Transcriptome: GRCm39-2024-A
+
+Pipeline Version: cellranger-8.0.1
+
+**Sample Information** **Sample information**
+
+KPCS 4 weeks - AL4 and AL7
+
+KPC 4 weeks - AL9
+
+KPC 7 weeks - AL8 and AL6
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(SoupX)
+
+library(dplyr)
+library(stringr)
+library(RColorBrewer)
+library(pheatmap)
+library(magrittr)
+library(fgsea)
+library(msigdbr)
+library(data.table)
+library(reticulate)
+library(harmony)
+set.seed(349)
+```
+
+## Step 1: Quality Countrol and Pre-processing of Single Nuclei Data
+
+### SoupX
+
+```{r}
+run_soupX <- function(filt, raw, out){
+  filt.matrix <- Read10X_h5(filt, use.names = T)
+  raw.matrix <- Read10x_h5(raw, use.names = T)
+  obj <- CreateSeuratObject(counts = filt.matrix)
+  soup.channel <- SoupChannel(raw.matrix, filt.matrix)
+  obj  <- FindVariableFeatures(obj , selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+  obj  <- NormalizeData(obj , verbose = FALSE)
+  obj  <- ScaleData(obj , verbose = FALSE)
+  obj  <- RunPCA(obj , features = VariableFeatures(obj ), verbose = FALSE)
+  obj  <- FindNeighbors(obj , dims = 1:30, verbose = FALSE)
+  obj  <- FindClusters(obj , resolution = 0.5, verbose = FALSE)
+  obj  <- RunUMAP(obj , dims = 1:30, verbose = FALSE)
+  meta    <- obj @meta.data
+  umap    <- obj @reductions$umap@cell.embeddings
+  soup.channel  <- setClusters(soup.channel, setNames(meta$seurat_clusters, rownames(meta)))
+  soup.channel  <- setDR(soup.channel, umap)
+  head(meta)
+  soup.channel  <- autoEstCont(soup.channel)
+  head(soup.channel$soupProfile[order(soup.channel$soupProfile$est, decreasing = T), ], n = 20)
+  adj.matrix  <- adjustCounts(soup.channel, roundToInt = T)
+  DropletUtils:::write10xCounts(out, ajd.matrix)
+}
+```
+
+**KPCS - 4 weeks**
+
+```{r eval=FALSE}
+#run run_soupX() for each sample to generate adjusted matrix files
+#filt = file_location
+KPCS_AL7 <- Read10x(data.dir = filt)
+KPCS_F <- CreateSeuratObject(counts = KPCS_AL7)
+rm(KPCS_AL7)
+
+KPCS_AL4 <- Read10x(data.dir = filt)
+KPCS_M <- CreateSeuratObject(counts = KPCS_AL4)
+rm(KPCS_AL4)
+
+#### add metadata 
+KPCS_F[["Group"]] <- "KPCS"
+KPCS_F[["Run_Date"]] <- "March 2025"
+KPCS_F[["Sample"]] <- "AL7"
+KPCS_F[["Sex"]] <- "Female"
+KPCS_F[["Age"]] <- "4 Weeks"
+KPCS_F[["Group_Age"]] <- "KPCS 4 weeks"
+
+KPCS_M[["Group"]] <- "KPCS"
+KPCS_M[["Run_Date"]] <- "March 2025"
+KPCS_M[["Sample"]] <- "AL4"
+KPCS_M[["Sex"]] <- "Male"
+KPCS_M[["Age"]] <- "4 Weeks"
+KPCS_M[["Group_Age"]] <- "KPCS 4 weeks"
+```
+
+**KPC - 4 weeks**
+
+```{r eval=FALSE}
+KPC_AL9 <- Read10x(data.dir = filt)
+KPC_M4 <- CreateSeuratObject(counts = KPC_AL9)
+rm(KPC_AL9)
+#### add metadata
+KPC_M4[["Group"]] <- "KPC"
+KPC_M4[["Run_Date"]] <- "March 2025"
+KPC_M4[["Sample"]] <- "AL9"
+KPC_M4[["Sex"]] <- "Male"
+KPC_M4[["Age"]] <- "4 Weeks"
+KPC_M4[["Group_Age"]] <- "KPC 4 weeks"
+```
+
+**KPC - 7 weeks**
+
+```{r eval = FALSE}
+KPC_AL6 <- Read10x(data.dir = filt)
+KPC_M7_1 <- CreateSeuratObject(counts = KPC_AL6)
+rm(KPC_AL6)
+
+KPC_AL8 <- Read10x(data.dir = filt)
+KPC_M7_2 <- CreateSeuratObject(counts = KPC_AL8)
+rm(KPC_AL8)
+#### add metadata
+KPC_M7_1[["Group"]] <- "KPC"
+KPC_M7_1[["Run_Date"]] <- "March 2025"
+KPC_M7_1[["Sample"]] <- "AL6"
+KPC_M7_1[["Sex"]] <- "Male"
+KPC_M7_1[["Age"]] <- "7 Weeks"
+KPC_M7_1[["Group_Age"]] <- "KPC 7 weeks"
+
+KPC_M7_2[["Group"]] <- "KPC"
+KPC_M7_2[["Run_Date"]] <- "March 2025"
+KPC_M7_2[["Sample"]] <- "AL8"
+KPC_M7_2[["Sex"]] <- "Male"
+KPC_M7_2[["Age"]] <- "4 Weeks"
+KPC_M7_2[["Group_Age"]] <- "KPC 7 weeks"
+```
+
+### Merge Objects
+
+```{r}
+obj <- merge(x = KPC_M4, y = c(KPC_M7_1, KPC_M7_2, KPCS_F, KPCS_M),
+             add.cell.ids = (c("KPC_M4", "KPC_M7_1", "KPC_M7_2", 
+                               "KPCS_F", "KPCS_M")))
+rm(KPC_M4, KPC_M7_1, KPC_M7_2, KPCS_F, KPCS_M)
+```
+
+### Log Normalize
+
+```{r}
+obj <- NormalizeData(object = obj, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+### Unbiased QC Cutoff
+
+```{r}
+obj[["percent.mt"]] <- PercentageFeatureSet(object = obj, pattern = "^mt")
+Idents(obj) <- "Sample"
+VlnPlot(obj, features = "percent.mt", split.by = "Sample", split.plot = TRUE, raster=FALSE)
+VlnPlot(obj, features = "nCount_RNA", split.by = "Sample", split.plot = TRUE, raster=FALSE)
+VlnPlot(obj, features = "nFeature_RNA", split.by = "Sample", split.plot = TRUE, raster=FALSE)
+```
+
+### Filter Out Low Quality Reads
+
+**Filter out low quality cells: \<100 reads and \>30% mitochondrial
+genes** **Filter out doublets: \>10,000 UMI**
+
+```{r}
+obj4 <- subset(x = obj, subset = nFeature_RNA > 100 & nCount_RNA < 100000 & percent.mt < 30) 
+rm(obj)
+VlnPlot(obj4, features = "percent.mt", split.by = "Sample", log = T)
+VlnPlot(obj4, features = "nCount_RNA", split.by = "Sample",  log = T)
+VlnPlot(obj4, features = "nFeature_RNA", split.by = "Sample", log = T)
+```
+
+### Identify Outlier features/genes
+
+```{r eval=FALSE}
+obj4 <- FindVariableFeatures(obj4, selection.method = "vst", nfeatures = 2000)
+```
+
+### Scale data and run principal component analysis (PCA) dimensionality reduction
+
+```{r eval=FALSE}
+obj4 <- ScaleData(obj4, verbose = T)
+obj4 <- RunPCA(obj4, npcs = 30, verbose = FALSE)
+```
+
+### Calculate Principal Components
+
+"Each PC represents a 'metagene' that combines information across a
+correlated gene set." <br> Determine the number of dimensions for
+dimensionality reduction is by calculating the number of dimensions
+where the PCs contribute to 90% of the standard deviation.
+
+```{r}
+st_dev <- obj4@reductions$pca@stdev
+var <- st_dev^2
+sum(var[1:21])/ sum(var) #change x (1:x) until you get as close to 0.9 as possible
+# Changed to 1:21. Results in 0.904 or 90.4%
+rm(st_dev, var)
+```
+
+### Clustering
+
+Seurat graphs each cell based on gene expression patter (cells with the
+most similar expression are closest together). <br> The higher the
+resolution is, the most clusters there will be. The lower the
+resolution, the fewer.
+
+```{r}
+obj4 <- FindNeighbors(object = obj4, dims = 1:21) #same as PCs calculated
+obj4 <- FindClusters(object = obj4, resolution = 0.2)
+obj4 <- RunUMAP(obj4, reduction = "pca", dims = 1:21, verbose = F)
+```
+
+### Dimensional Reduction pre-Integration
+
+```{r}
+Idents(obj4) <- "Sample"
+DimPlot(obj4, reduction = "umap", label = T)
+```
+
+**Because the clustering is currently separating cells based on sample,
+we can conclude there is a batch effect occurring.**
+
+**Therefore, the samples must be integrated before we can draw any
+meaningful conclusions from the data**
+
+### Integration using Harmony
+
+```{r eval=FALSE}
+obj4 <- IntegrateLayers(object = obj4, method = HarmonyIntegration,
+  orig.reduction = "pca", new.reduction = "harmony",
+  verbose = TRUE
+)
+
+# re-join layers after integration
+obj4[["RNA"]] <- JoinLayers(obj4[["RNA"]])
+
+obj4 <- ScaleData(obj4, verbose = T)
+obj4 <- RunPCA(obj4, npcs = 30, verbose = FALSE)
+obj4 <- FindNeighbors(object = obj4, dims = 1:21) #same as PCs calculated
+obj4 <- FindClusters(object = obj4, resolution = 0.2)
+obj4 <- RunUMAP(obj4, reduction = "harmony", dims = 1:21, verbose = F)
+obj4 <- JoinLayers(obj4)
+```
+
+### Dimensional Reduction post-Integration
+
+```{r}
+Idents(obj4) <- "Sample"
+DimPlot(obj4, reduction = "umap", label = T)
+Idents(obj4) <- "seurat_clusters"
+DimPlot(obj4, reduction = "umap", label = T, split.by = "Sample")
+```
+
+### Identify Cluster Identity Manually
+
+```{r}
+cell_types <-  c("Cdh1", "Epcam", "Rbpjl", "Sox9", "Muc1", "Pkhd1", "Erbb4", "Krt19", "Msln", "Cpa1", "Cela2a", "Cpa2", "Cpb1", "Pnliprp1","Pnlip", "Ins1", "Ins2", "Fbn1", "Fndc1", "Col3a1", "Col1a1", "Pdgfra", "Acta2", "Mki67", "Ptprc", "Fyb", "Cd4", "Cd19", "Dock10", "Nrros", "Cdh5", "Pecam1", "Ncam1", "Hba-a1",  "Plin1", "Plin4")
+DotPlot(obj3, features = cell_types, cols = c("RdBu"), dot.scale = 8) + RotatedAxis()
+```
+
+### Label Clusters according to Manual Classification
+
+```{r}
+Idents(obj4) <- "seurat_clusters"
+obj4 <- RenameIdents(obj4, 
+                    "0" = "Acinar", 
+                    "1" = "Epithelial", 
+                    "2" = "Epithelial", 
+                    "3" = "Immune", 
+                    "4" = "Fibroblast", 
+                    "5" = "Epithelial", 
+                    "6" = "Endothelial",  
+                    "7" = "Immune", 
+                    "8" = "Fibroblast",
+                    "9" = "Immune", 
+                    "10" = "Ductal", 
+                    "11" = "Immune", 
+                    "12" = "Stellate",
+                    "13" = "Fibroblast", 
+                    "14" = "Fibroblast",
+                    "15" = "Endothelial",
+                    "16" = "Acinar",
+                    "17" = "Enterocyte",
+                    "18" = "Endocrine", 
+                    "19" = "Immune",
+                    "20" = "Tuft")
+#This give your clusters a name that you can switch between using ' Idents(obj4) <- "manual_clusters"
+obj4[["manual_clusters_v1"]] <- obj4@active.ident
+#SaveSeuratRds(obj4, file = **location of choice**)
+```
+
+## Step 2: Characterizing single nuclei samples
+
+### Checking markers of cell type, Scap/Srebp pathway, and mouse genotype
+
+```{r}
+Idents(obj4) <- "manual_clusters"
+DoHeatmap(obj4, cell_types, label = F)+scale_fill_gradient2(low = "#333DBF",
+  mid = "white",
+  high = "#D22828")
+#heatmap_tumor <- DoHeatmap(obj4, cell_types, label = F)+scale_fill_gradient2(low = "#333DBF",
+#  mid = "white",
+#  high = "#D22828")
+#ggsave("heatmap_tumor.emf", plot = heatmap_tumor, width = 8.59, height = 5.19, dpi = 300)
+Srebp_targets = c("Scap", "Srebf1", "Srebf2", "Acaca", "Acacb", "Fasn", "Elovl6", "Scd1", "Hmgcr", "Hmgcs1", "Hmgcs2")
+DotPlot(obj4, features = Srebp_targets, cols = c("RdBu"), dot.scale = 8, split.by = "Group") + RotatedAxis()
+#scap_dot <- DotPlot(obj4, features = Srebp_targets, cols = c("RdBu"), dot.scale = 8, split.by = "Group") + RotatedAxis()
+#ggsave("tumor_srebps_dot.eps", plot= scap_dot, width=6, height=7, dpi=300, bg = "transparent")
+DotPlot(obj4, features = c("Kras", "Trp53", "Scap"), cols = c("RdBu"), dot.scale = 8, split.by = "Group") + RotatedAxis()
+```
+
+### Checking UMAP with manual clusters
+
+```{r}
+Idents(obj4) <- "manual_clusters"
+DimPlot(obj4, reduction = "umap", cols = "Paired")
+DimPlot(obj4, reduction = "umap", cols = "Paired", split.by = "Group_Age")
+#umap <- DimPlot(obj4, reduction = "umap", cols = "Paired")+theme(legend.background = element_rect(fill = "transparent"))
+#ggsave("tumor_UMAP_2025.06.18.svg", plot= umap, width=10, height=10, dpi=300, bg = "transparent")
+#umap_group <- DimPlot(obj4, reduction = "umap", cols = "Paired", split.by = "Group_Age")+theme(legend.background = element_rect(fill = "transparent"))
+#ggsave("tumor_UMAP_split.svg", plot= umap_group, width=15, height=10, dpi=300, bg = "transparent")
+```
+
+### count number of cells per cluster
+
+(<https://www.biostars.org/p/399234/>)
+
+```{r eval=FALSE}
+# extract meta data - the resulting md object has one "row" per cell
+md <- obj4@meta.data %>% as.data.table
+
+#count the number of cells per unique combination of "Sample" and "seurat_clusters"
+md[, .N, by = c("Sample", "manual_clusters")]
+
+#with additional casting after the counting
+plot <- md[, .N, by = c("Sample", "manual_clusters")] %>% dcast(., Sample ~ manual_clusters, value.var = "N")
+#write.csv(plot, FILE_LOCATION)
+
+##plot (had to reorganize in excel for plot. Plotting the average cluster percent count for each group)
+#plot <- read.csv(FILE_LOCATION)
+ggplot(plot, aes(fill= reorder(manual_clusters, -order), y=percent.count, x= Sample)) + 
+    geom_bar(position="stack", color = "black", stat="identity")+scale_fill_brewer(palette = "Paired")+theme_prism()
+```
+
+## Stepe 3: Find Differentially Expressed Genes for Downstream Analysis
+
+**FUNCTIONS**
+
+```{r}
+## Add Ensemble IDs to FindMarkers() output
+add_ensembl <- function(df, tsv, folder, fn){
+  genes <- read.table(tsv, stringsAsFactors = FALSE)
+  genes$V2 <- make.unique(genes$V2)
+  write.csv(df, paste(folder, fn,".csv"))
+  t1 <- tibble::rownames_to_column(df, "V2")
+  t2 <- inner_join(t1, genes, by = join_by(V2))
+  write.csv(t2, paste(folder,"with ensemble/",fn,"_test.csv", sep=""))
+  return(t2)
+}
+```
+
+```{r}
+#tsv <- "/CellRanger_output/AL9_outs/filtered_feature_bc_matrix/features.tsv.gz"
+#folder <- "/2025.04.03-KPCSvKPC analysis/FINAL ANALYSIS - 2025.05.04/diff expression/"
+
+Idents(obj4) <- "Group_Age"
+Tumors <- subset(obj4, idents = c("KPC 7 weeks", "KPCS 4 weeks"))
+Idents(Tumors) <- "manual_clusters"
+DimPlot(Tumors)
+
+Acinar_tumors <- subset(Tumors, idents = "Acinar")
+Idents(Acinar_tumors) <- "Group"
+KPCSvKPC <- FindMarkers(Acinar_tumors, ident.1 = "KPCS", ident.2 = "KPC", ogfc.threshold = -Inf, min.pct = -Inf, min.diff.pct = -Inf)
+kvk <- add_ensembl(KPCSvKPC, tsv, folder, "Acinar_tumors_KPCSvKPC_2025.05.23")
+
+Epithelial_tumors <- subset(Tumors, idents = "Epithelial")
+Idents(Epithelial_tumors) <- "Group"
+KPCSvKPC <- FindMarkers(Epithelial_tumors, ident.1 = "KPCS", ident.2 = "KPC", ogfc.threshold = -Inf, min.pct = -Inf, min.diff.pct = -Inf)
+kvk <- add_ensembl(KPCSvKPC, tsv, folder, "Epithelial_tumors_KPCSvKPC_2025.05.23")
+
+EMT_I_tumors <- subset(Tumors, idents = "Stellate")
+Idents(EMT_I_tumors) <- "Group"
+KPCSvKPC <- FindMarkers(EMT_I_tumors, ident.1 = "KPCS", ident.2 = "KPC", ogfc.threshold = -Inf, min.pct = -Inf, min.diff.pct = -Inf)
+kvk <- add_ensembl(KPCSvKPC, tsv, folder, "Stellate_tumors_KPCSvKPC_2025.05.23")
+
+Fibroblast_tumors <- subset(Tumors, idents = "Fibroblast")
+Idents(Fibroblast_tumors) <- "Group"
+KPCSvKPC <- FindMarkers(Fibroblast_tumors, ident.1 = "KPCS", ident.2 = "KPC", ogfc.threshold = -Inf, min.pct = -Inf, min.diff.pct = -Inf)
+kvk <- add_ensembl(KPCSvKPC, tsv, folder, "Fibroblast_tumors_KPCSvKPC_2025.05.23")
+
+Ductal_tumors <- subset(Tumors, idents = "Ductal")
+Idents(Ductal_tumors) <- "Group"
+KPCSvKPC <- FindMarkers(Ductal_tumors, ident.1 = "KPCS", ident.2 = "KPC", ogfc.threshold = -Inf, min.pct = -Inf, min.diff.pct = -Inf)
+kvk <- add_ensembl(KPCSvKPC, tsv, folder, "Ductal_tumors_KPCSvKPC_2025.05.23")
+```
+
+```{r}
+sessionInfo()
+```
