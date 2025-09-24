@@ -341,6 +341,7 @@ DotPlot(obj, features = acinar_types, cols = c("RdBu"), dot.scale = 8) + Rotated
 # Functions
 ```{r}
 ## Add Ensemble IDs to DEA information
+### tsv = filtered features.tsv.gz for a sample in the study
 add_ensembl <- function(df, tsv, folder, fn){
   genes <- read.table(tsv, stringsAsFactors = FALSE)
   genes$V2 <- make.unique(genes$V2)
@@ -383,4 +384,5 @@ Mesenchymal_En <- add_ensembl(MesenchymalDE, tsv, folder, fn)
 Idents(Mesenchymal.only) <- "manual_clusters"
 VlnPlot(Mesenchymal.only, features = c("Kitl", "Kit", "Lepr"), cols = c("#D22828", "#333DBF"), pt.size = 0, split.by = "Group", split.plot = T, log = T)
 VlnPlot(Mesenchymal.only, features = c("Pdgfra", "Fap", "Vim", "Il6"), cols = c("#D22828", "#333DBF"), pt.size = 0, split.by = "Group", split.plot = T, log = T)
+
 ```
